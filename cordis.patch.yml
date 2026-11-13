@@ -1,0 +1,4 @@
+- insert:
+    - id: remote-host
+      name: 'dsh-remote-workbench'
+      config: {}

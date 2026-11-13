@@ -1,0 +1,13 @@
+{
+  "id": "dsh-external/dsh-remote-workbench",
+  "version": "0.1.0",
+  "main": "./src/index.js",
+  "description": "使用本机 OpenSSH 管理远程服务器文件、监控与 Slurm 作业。",
+  "engines": {
+    "dsh": ">=0.2.2-alpha.2"
+  },
+  "contributes": {
+    "tools": [],
+    "skills": []
+  }
+}
