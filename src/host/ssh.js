@@ -85,6 +85,7 @@ export async function saveHost(input) {
 
 export function createSshPool(source) {
   const workers = new Map()
+  const disconnected = new Set()
   let nextId = 0
   function start(alias) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(String(alias))) throw new Error('无效的 SSH 主机别名')
@@ -96,6 +97,7 @@ export function createSshPool(source) {
       for (const item of worker.pending.values()) { clearTimeout(item.timer); item.reject(error) }
       worker.pending.clear()
     }
+    worker.fail = fail
     child.stderr.on('data', chunk => { worker.stderr = (worker.stderr + chunk).slice(-32768) })
     child.stdin.on('error', error => fail(new Error('SSH 连接已中断：' + error.message)))
     child.on('error', error => fail(new Error(error.code === 'ENOENT' ? '本机未找到 OpenSSH ssh 命令' : error.message)))
@@ -111,7 +113,14 @@ export function createSshPool(source) {
     return worker
   }
   return {
+    connect(alias) { disconnected.delete(alias) },
+    disconnect(alias) {
+      disconnected.add(alias)
+      const worker = workers.get(alias)
+      if (worker) { worker.fail(new Error('SSH 连接已断开')); worker.child.kill() }
+    },
     request(alias, payload, timeout = 25000) {
+      if (disconnected.has(alias)) return Promise.reject(new Error('SSH 连接已断开，请重新选择服务器'))
       const worker = workers.get(alias) || start(alias)
       const id = ++nextId
       return new Promise((resolve, reject) => {

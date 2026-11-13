@@ -283,7 +283,8 @@ export function createRemoteHostService() {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(alias)) throw new Error('请选择有效的 SSH 配置项')
       const configured = await readHosts()
       if (!configured.some((host) => host.id.toLowerCase() === alias.toLowerCase())) throw new Error('该服务器不在本机 SSH 配置中')
-      if (op === 'hosts.connect') return remote(alias, 'ping', {}, 15000)
+      if (op === 'hosts.disconnect') { pool.disconnect(alias); samples.delete(alias); return { disconnected: true } }
+      if (op === 'hosts.connect') { pool.connect(alias); return remote(alias, 'ping', {}, 15000) }
       if (op === 'hosts.probe') {
         const snap = await remote(alias, 'snapshot', {}, 15000)
         const old = samples.get(alias)
