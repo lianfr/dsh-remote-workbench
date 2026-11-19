@@ -1,4 +1,8 @@
 import { createSshPool, readHosts, saveHost } from './ssh.js'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
 
 const MAX_PREVIEW = 1024 * 1024
 const MAX_TRANSFER = 32 * 1024 * 1024
@@ -144,6 +148,21 @@ def partitions():
 
 def dispatch(payload):
     action = payload.get('action')
+    if action == 'discover_nodes':
+        if not shutil.which('sinfo'): return {'nodes': [], 'available': False}
+        rc, out, err = run(['sinfo', '--Node', '--noheader', '--format=%N'], timeout=12)
+        if rc: raise RuntimeError(err.strip() or '无法获取 Slurm 节点')
+        names = list(dict.fromkeys(line.strip() for line in out.splitlines() if line.strip()))
+        addresses = {}
+        if shutil.which('scontrol'):
+            status, details, _ = run(['scontrol', 'show', 'nodes', '-o'], timeout=12)
+            if status == 0:
+                for line in details.splitlines():
+                    fields = dict(part.split('=', 1) for part in line.split() if '=' in part)
+                    name, address = fields.get('NodeName', ''), fields.get('NodeAddr', '')
+                    if name in names and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,252}', address):
+                        addresses[name] = address
+        return {'nodes': [{'name': name, 'address': addresses.get(name, name)} for name in names], 'available': True}
     if action == 'ping': return {'home': os.path.expanduser('~'), 'identity': getpass.getuser()}
     if action == 'snapshot': return snapshot()
     if action == 'processes': return process_list()
@@ -270,6 +289,7 @@ with ThreadPoolExecutor(max_workers=4) as executor:
 
 export function createRemoteHostService() {
   const samples = new Map()
+  const sshUsers = new Map()
   const pool = createSshPool(PY)
   async function remote(alias, action, payload = {}, timeout) {
     return pool.request(alias, { action, ...payload }, timeout || 25000)
@@ -283,8 +303,32 @@ export function createRemoteHostService() {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(alias)) throw new Error('请选择有效的 SSH 配置项')
       const configured = await readHosts()
       if (!configured.some((host) => host.id.toLowerCase() === alias.toLowerCase())) throw new Error('该服务器不在本机 SSH 配置中')
-      if (op === 'hosts.disconnect') { pool.disconnect(alias); samples.delete(alias); return { disconnected: true } }
-      if (op === 'hosts.connect') { pool.connect(alias); return remote(alias, 'ping', {}, 15000) }
+      if (op === 'hosts.disconnect') { pool.disconnect(alias); sshUsers.delete(alias); samples.delete(alias); return { disconnected: true } }
+      if (op === 'hosts.connect') { sshUsers.delete(alias); pool.connect(alias); return remote(alias, 'ping', {}, 15000) }
+      if (op === 'cluster.discover') return remote(alias, 'discover_nodes', {}, 15000)
+      if (op === 'cluster.close') { pool.closeVia(alias, Array.isArray(payload.keep) ? payload.keep : []); return { ok: true } }
+      if (op === 'cluster.snapshot' || op === 'cluster.processes') {
+        const node = String(payload.node || '')
+        const match = /^([A-Za-z0-9][A-Za-z0-9._-]{0,252})(?::([0-9]{1,5}))?$/.exec(node)
+        const port = match ? Number(match[2] || 22) : 0
+        if (!match || port < 1 || port > 65535) throw new Error('节点地址或端口无效')
+        let user = sshUsers.get(alias)
+        if (!user) {
+          const { stdout } = await execFileAsync('ssh', ['-G', alias], { timeout: 8000, maxBuffer: 1024 * 1024 })
+          user = /^user\s+(\S+)/im.exec(stdout)?.[1]
+          if (user) sshUsers.set(alias, user)
+        }
+        if (!user || !/^[A-Za-z0-9_.-]+$/.test(user)) throw new Error('无法确定 SSH 登录用户')
+        const address = String(payload.address || match[1])
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(address)) throw new Error('节点地址无效')
+        const via = { jump: alias, port, user, name: match[1] }
+        const key = alias + '|' + node
+        const value = await pool.request(address, { action: op === 'cluster.snapshot' ? 'snapshot' : 'processes' }, 25000, via)
+        if (op === 'cluster.processes') return value
+        const result = derive(value, samples.get(key), node)
+        samples.set(key, { raw: value, at: Date.now() })
+        return result
+      }
       if (op === 'hosts.probe') {
         const snap = await remote(alias, 'snapshot', {}, 15000)
         const old = samples.get(alias)

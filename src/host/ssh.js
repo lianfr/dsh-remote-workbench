@@ -87,13 +87,15 @@ export function createSshPool(source) {
   const workers = new Map()
   const disconnected = new Set()
   let nextId = 0
-  function start(alias) {
+  function start(alias, via = null) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(String(alias))) throw new Error('无效的 SSH 主机别名')
-    const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2', alias, 'python3', '-u', '-c', shellQuote(source)], { stdio: ['pipe', 'pipe', 'pipe'] })
+    const key = via ? `${via.jump}|${via.name || alias}|${via.port}|${via.user}|${alias}` : alias
+    const route = via ? ['-J', via.jump, '-p', String(via.port), '-l', via.user, alias] : [alias]
+    const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2', ...route, 'python3', '-u', '-c', shellQuote(source)], { stdio: ['pipe', 'pipe', 'pipe'] })
     const worker = { child, pending: new Map(), stderr: '' }
-    workers.set(alias, worker)
+    workers.set(key, worker)
     const fail = (error) => {
-      if (workers.get(alias) === worker) workers.delete(alias)
+      if (workers.get(key) === worker) workers.delete(key)
       for (const item of worker.pending.values()) { clearTimeout(item.timer); item.reject(error) }
       worker.pending.clear()
     }
@@ -116,12 +118,21 @@ export function createSshPool(source) {
     connect(alias) { disconnected.delete(alias) },
     disconnect(alias) {
       disconnected.add(alias)
+      this.closeVia(alias)
       const worker = workers.get(alias)
       if (worker) { worker.fail(new Error('SSH 连接已断开')); worker.child.kill() }
     },
-    request(alias, payload, timeout = 25000) {
-      if (disconnected.has(alias)) return Promise.reject(new Error('SSH 连接已断开，请重新选择服务器'))
-      const worker = workers.get(alias) || start(alias)
+    closeVia(jump, keep = []) {
+      for (const [key, worker] of workers) {
+        if (key.startsWith(jump + '|') && !keep.includes(key.split('|')[1] + ':' + key.split('|')[2])) {
+          worker.fail(new Error('已停止节点监控')); worker.child.kill()
+        }
+      }
+    },
+    request(alias, payload, timeout = 25000, via = null) {
+      if (disconnected.has(via?.jump || alias)) return Promise.reject(new Error('SSH 连接已断开，请重新选择服务器'))
+      const key = via ? `${via.jump}|${via.name || alias}|${via.port}|${via.user}|${alias}` : alias
+      const worker = workers.get(key) || start(alias, via)
       const id = ++nextId
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => { worker.child.kill(); }, timeout)
