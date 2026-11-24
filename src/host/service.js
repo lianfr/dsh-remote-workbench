@@ -121,18 +121,19 @@ def process_list():
     return result[:3000]
 
 def jobs(scope):
-    fmt = '%i|%j|%T|%P|%D|%b|%M|%R|%u'
+    fmt = '%i|%j|%T|%P|%D|%b|%M|%R|%u|%l|%Z|%o'
     args = ['squeue', '--noheader', '--format=' + fmt]
     if scope == 'mine': args += ['--user', getpass.getuser()]
     rc, out, err = run(args, timeout=12)
     if rc: raise RuntimeError(err.strip() or 'squeue 查询失败')
     rows = []
     for line in out.splitlines():
-        v = line.split('|', 8)
-        if len(v) != 9: continue
+        v = line.split('|', 11)
+        if len(v) < 9: continue
         gres = v[5].lower(); match = re.search(r'gpu(?::(?:[^:,()]+:)?(\d+))?', gres)
         rows.append({'id': v[0], 'name': v[1], 'state': v[2], 'part': v[3], 'nodes': int(v[4]) if v[4].isdigit() else 0,
-          'gpu': int(match.group(1) or 1) if match else 0, 'time': v[6], 'reason': v[7], 'user': v[8]})
+          'gpu': int(match.group(1) or 1) if match else 0, 'time': v[6], 'reason': v[7], 'user': v[8],
+          'timeLimit': v[9] if len(v) > 9 else '', 'workDir': v[10] if len(v) > 10 else '', 'command': v[11] if len(v) > 11 else ''})
     return rows
 
 def partitions():
@@ -214,9 +215,14 @@ def dispatch(payload):
     if action == 'job':
         job_id = str(payload.get('id',''))
         if not re.fullmatch(r'\d+(?:_\d+)?', job_id): raise ValueError('作业 ID 无效')
-        rc, out, err = run(['scontrol', 'show', 'job', '-o', job_id], timeout=10)
-        if rc: raise RuntimeError(err.strip() or '作业详情读取失败')
-        return dict(re.findall(r'([A-Za-z][A-Za-z0-9_]*)=([^ ]*)', out))
+        rc, out, err = run(['scontrol', 'show', 'job', '-o', job_id], timeout=5)
+        if rc == 0 and out.strip():
+            return dict(re.findall(r'([A-Za-z][A-Za-z0-9_]*)=([^ ]*)', out))
+        rc2, out2, err2 = run(['squeue', '--noheader', '-j', job_id, '--format=%N|%l|%Z|%o'], timeout=5)
+        if rc2 == 0 and out2.strip():
+            p = out2.splitlines()[0].split('|', 3)
+            if len(p) == 4: return {'NodeList': p[0], 'TimeLimit': p[1], 'WorkDir': p[2], 'Command': p[3]}
+        raise RuntimeError((err or err2).strip() or '作业详情读取失败')
     if action == 'cancel':
         jid = str(payload.get('id',''))
         if not re.fullmatch(r'\d+(?:_\d+)?', jid): raise ValueError('作业 ID 无效')
